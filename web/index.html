@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Media Organizer — Neo-Brutalism Edition</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Neo-Brutalism Pattern Background -->
+  <div class="brutal-pattern"></div>
+
+  <div class="app-container">
+    <!-- Header Banner -->
+    <header class="glass-card header-card">
+      <div class="brand">
+        <div class="brand-icon">⚡</div>
+        <div>
+          <h1 class="brand-title">AI MEDIA ORGANIZER</h1>
+          <p class="brand-subtitle">Zero-Shot Vision Classifier // OpenAI CLIP Engine</p>
+        </div>
+      </div>
+      <div class="hardware-badge" id="hardwareBadge">
+        <span class="pulse-dot"></span>
+        <span id="computeDevice">Detecting Hardware...</span>
+      </div>
+    </header>
+
+    <!-- Glass Grid Layout -->
+    <div class="glass-grid">
+      <!-- Card 1: Directory Selection & Exclusions -->
+      <section class="glass-card">
+        <div class="card-header">
+          <span class="card-icon">📂</span>
+          <h2>Directory Selection</h2>
+        </div>
+        <div class="input-group">
+          <label for="srcInput">Source Folder</label>
+          <div class="input-with-button">
+            <input type="text" id="srcInput" value="E:/" placeholder="Select source folder..." />
+            <button type="button" id="browseSrcBtn" class="glass-button secondary">Browse...</button>
+          </div>
+        </div>
+        <div class="input-group">
+          <label for="destInput">Destination Folder</label>
+          <div class="input-with-button">
+            <input type="text" id="destInput" value="E:/Organized_Media" placeholder="Select destination folder..." />
+            <button type="button" id="browseDestBtn" class="glass-button secondary">Browse...</button>
+          </div>
+        </div>
+        <div class="input-group">
+          <label for="excludeInput">Exclude Folders <span class="help-text">(comma-separated)</span></label>
+          <input type="text" id="excludeInput" value="Bestof2k25, Effects, Games, LrCats, M31 Backup, PSDs, Pixels '25, S25 Backup, Verilog, WindowsApps, WpSystem, site" />
+        </div>
+      </section>
+
+      <!-- Card 2: Organizer & AI Settings -->
+      <section class="glass-card">
+        <div class="card-header">
+          <span class="card-icon">⚙️</span>
+          <h2>Organizer Settings</h2>
+        </div>
+        
+        <div class="settings-grid">
+          <div class="input-group">
+            <label>Action Mode</label>
+            <div class="radio-toggle">
+              <label class="radio-label">
+                <input type="radio" name="actionMode" value="copy" checked>
+                <span class="radio-custom">Copy (Safe)</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="actionMode" value="move">
+                <span class="radio-custom">Move (Verified Delete)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="input-group">
+            <label for="confidenceRange">Confidence Threshold: <span id="confValue" class="value-highlight">0.25</span></label>
+            <input type="range" id="confidenceRange" min="0.0" max="1.0" step="0.05" value="0.25" />
+          </div>
+
+          <div class="input-group">
+            <label for="modelSelect">CLIP AI Model</label>
+            <select id="modelSelect" class="glass-select">
+              <option value="openai/clip-vit-large-patch14" selected>openai/clip-vit-large-patch14 (High Accuracy)</option>
+              <option value="openai/clip-vit-base-patch32">openai/clip-vit-base-patch32 (Fast CPU/Base)</option>
+            </select>
+          </div>
+
+          <div class="input-group inline-numbers">
+            <div>
+              <label for="batchSizeInput">Batch Size</label>
+              <input type="number" id="batchSizeInput" value="16" min="1" max="128" />
+            </div>
+            <div>
+              <label for="threadsInput">Worker Threads</label>
+              <input type="number" id="threadsInput" value="4" min="1" max="16" />
+            </div>
+          </div>
+        </div>
+
+        <div class="checkbox-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="executeCheck">
+            <span class="checkbox-custom"></span>
+            <span>Execute File Transfers <span class="help-text">(Uncheck for Dry Run preview)</span></span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="classifyVideosCheck" checked>
+            <span class="checkbox-custom"></span>
+            <span>Classify Videos via Frame Extraction</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="dedupeCheck">
+            <span class="checkbox-custom"></span>
+            <span>Deduplicate (Route exact MD5 matches to Duplicates/)</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="preserveFoldersCheck" checked>
+            <span class="checkbox-custom"></span>
+            <span>Preserve Subfolder Structure</span>
+          </label>
+        </div>
+      </section>
+    <!-- Control Actions Bar -->
+    <div class="glass-card action-bar">
+      <button id="dryRunBtn" class="glass-button secondary-accent">🧪 RUN DRY RUN (PREVIEW)</button>
+      <button id="executeBtn" class="glass-button primary-accent">⚡ EXECUTE FILE TRANSFERS</button>
+      <button id="stopBtn" class="glass-button danger" disabled>⏹ STOP</button>
+    </div>
+
+    <!-- Progress & Terminal Activity Log -->
+    <section class="glass-card console-card">
+      <div class="card-header space-between">
+        <div class="card-header-title">
+          <span class="card-icon">📊</span>
+          <h2>Progress & Activity Console</h2>
+        </div>
+        <span id="statusText" class="status-indicator">System Ready</span>
+      </div>
+
+      <div class="progress-container">
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressFill" style="width: 0%;"></div>
+        </div>
+        <span class="progress-percentage" id="progressPercent">0%</span>
+      </div>
+
+      <div class="console-box" id="consoleBox">
+        <div class="console-line info">[SYSTEM] Authenticated Glassmorphism environment initialized.</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Completion Modal -->
+  <div class="modal-backdrop" id="summaryModal">
+    <div class="glass-card modal-card">
+      <h2 class="modal-title" id="modalTitle">🎉 Organization Complete</h2>
+      <div class="modal-stats" id="modalStats"></div>
+      <div class="modal-actions" id="modalActions">
+        <button id="proceedExecuteBtn" class="glass-button primary-accent" style="display: none;">⚡ PROCEED TO REAL EXECUTION</button>
+        <button id="closeModalBtn" class="glass-button secondary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
