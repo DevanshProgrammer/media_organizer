@@ -1,6 +1,6 @@
 # ⚡ AI Media Organizer
 
-An AI-powered photo and video classifier that automatically sorts media into categorized, dated subfolders using **OpenAI's CLIP Zero-Shot Vision Model**, EXIF date extraction, multithreaded decoding, and optional MD5 duplicate detection.
+An AI-powered photo and video classifier that automatically sorts media into categorized subfolders using **OpenAI's CLIP Zero-Shot Vision Model**, EXIF date extraction, multithreaded decoding, and optional MD5 duplicate detection.
 
 Supports **Desktop GUI**, **Web Application**, and **CLI Interface**.
 

@@ -485,7 +485,7 @@ def transfer_and_log_file(file_path: Path, is_video: bool, category: str, media_
                 known_hashes.add(file_hash)
 
         base_target = get_base_target_dir(file_path, drive_root, dest_dir, preserve_folders)
-        target_dir = base_target / ("Videos" if is_video else "Photos") / final_cat / media_date
+        target_dir = base_target / ("Videos" if is_video else "Photos") / final_cat
         target_path = get_unique_target_path(target_dir, file_path.name)
         media_type = "VIDEO" if is_video else "PHOTO"
 
