@@ -1,14 +1,17 @@
 """
-Media Organizer Desktop GUI — AI-powered photo & video classifier with Glassmorphism UI.
+AI Media Organizer — Neural Vision Command Center (Smooth Maximalist Edition)
 
-Provides a modern, high-contrast Glassmorphism desktop user interface built with Python's native
-tkinter/ttk library. Features translucent dark card layouts, electric cyan/purple accents,
-background multithreading, real-time logging, and interactive controls.
+A state-of-the-art, high-density, smooth maximalist desktop GUI built with CustomTkinter.
+Features antialiased geometry, Windows High-DPI awareness, live hardware telemetry HUD,
+real-time KPI metric cards, interactive exclusion tag cloud, neural category matrix with
+live file counters, multi-theme engine, and high-performance async processing pipeline.
 """
 
 import os
+import sys
 import csv
 import json
+import time
 import queue
 import shutil
 import hashlib
@@ -18,678 +21,1134 @@ from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Enable Windows Per-Monitor High-DPI Scaling for ultra-crisp rendering
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
-
+from tkinter import filedialog, messagebox, scrolledtext
+import customtkinter as ctk
 from PIL import Image, ExifTags
-from run_worker import run_worker as execute_run_worker, run_unsort_worker as execute_run_unsort_worker
 
-# Disable Pillow decompression bomb limit for ultra-high-res panoramas/gigapixel images
+from run_worker import run_worker as execute_run_worker, run_unsort_worker as execute_run_unsort_worker
+from organize_media import (
+    DEFAULT_CATEGORIES,
+    LEGACY_CATEGORY_MAP,
+    normalize_category_name,
+    EXCLUDE_FOLDERS,
+    SYSTEM_EXCLUDES,
+    IMAGE_EXTS,
+    VIDEO_EXTS,
+    RAW_EXTS,
+    HEIF_EXTS,
+    get_torch_device as organize_get_torch_device,
+)
+
+# Pillow decompression bomb protection override for gigapixel panoramas
 Image.MAX_IMAGE_PIXELS = None
 
-# Optional decoders — guarded so script runs even if missing
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-    HEIF_SUPPORT = True
-except ImportError:
-    HEIF_SUPPORT = False
-
-try:
-    import rawpy
-    RAW_SUPPORT = True
-except ImportError:
-    RAW_SUPPORT = False
-
-import torch
-from transformers import CLIPProcessor, CLIPModel
-
-# ==========================================
-# DEFAULT CATEGORIES (Folder Name -> CLIP Prompt)
-# ==========================================
-DEFAULT_CATEGORIES = {
-    "Flora_Plants": "flowers, floral petals, plants, leaves, trees, or botanical close-up photo",
-    "Aviation_Vehicles": "airplane, aircraft, jet, helicopter, car, or vehicle in the sky or on road",
-    "Animal_Wildlife": "animal, pet, dog, cat, mammal, or reptile shown close-up",
-    "Bird": "bird shown close-up as the main subject of the photo",
-    "Portrait": "a portrait or close-up photo of a person or group of people",
-    "Landscape": "landscape scenery of mountains, water, sky, lakes, or forest as main subject",
-    "Street_Urban": "street and urban city view with roads or traffic",
-    "Architecture": "architecture, building exterior, facade, monument, or interior architectural design",
-    "Food_Dining": "food, meal, dish, or dining setup",
-    "Document": "a document, paper, receipt, invoice, or text screenshot",
-    "Event": "an event, party, wedding, concert, or group celebration",
-}
-
-# File Extension Filters (All Camera RAW Formats Supported)
-RAW_EXTS = {
-    ".arw", ".srf", ".sr2",         # Sony
-    ".cr2", ".cr3", ".crw",         # Canon
-    ".nef", ".nrw",                 # Nikon
-    ".raf",                         # Fujifilm
-    ".rw2",                         # Panasonic / Lumix
-    ".orf",                         # Olympus / OM System
-    ".dng", ".raw", ".rwl",         # Leica / Universal DNG
-    ".pef", ".ptx",                 # Pentax
-    ".3fr", ".fff",                 # Hasselblad
-    ".iiq", ".cap",                 # Phase One / Mamiya
-    ".x3f",                         # Sigma
-    ".mrw",                         # Minolta / Konica
-    ".srw",                         # Samsung
-    ".kdc", ".dcr", ".k25", ".erf"  # Kodak / Epson
-}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tiff", ".tif", ".bmp", ".gif"} | RAW_EXTS
-HEIF_EXTS = {".heic", ".heif"}
-VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".wmv", ".mxf", ".mts"}
-
-SYSTEM_EXCLUDES = {
-    "$recycle.bin", "system volume information", ".trash-1000",
-    ".trashes", ".git", "node_modules", "appdata", "tmp",
-}
-
-EXCLUDE_FOLDERS = {
-    "Games", "Effects", "M31 Backup", "S25 Backup", "PSDs", "LrCats",
-    "Pixels '25", "WindowsApps", "Verilog", "Bestof2k25", "WpSystem", "site",
-}
-
-
-# ==========================================
-# GPU ACCELERATION SETUP
-# ==========================================
-def get_torch_device() -> tuple[torch.device, str]:
-    if torch.cuda.is_available():
-        return torch.device("cuda"), f"CUDA: {torch.cuda.get_device_name(0)}"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps"), "Apple Silicon MPS"
-    else:
-        return torch.device("cpu"), "CPU (No GPU Detected)"
-
-
-# ==========================================
-# CHECKPOINTING & LOGGING
-# ==========================================
-def load_checkpoint(checkpoint_file: Path) -> set:
-    if checkpoint_file.exists():
-        try:
-            with open(checkpoint_file, "r") as f:
-                data = json.load(f)
-            return set(data.get("done", []))
-        except Exception:
-            pass
-    return set()
-
-
-def save_checkpoint(checkpoint_file: Path, done_set: set):
-    checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = checkpoint_file.with_suffix(".tmp")
-    with open(tmp_path, "w") as f:
-        json.dump({"done": sorted(done_set)}, f)
-    tmp_path.replace(checkpoint_file)
-
-
-def init_log(log_file: Path, dry_run: bool):
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    is_new = not log_file.exists()
-    f = open(log_file, "a", newline="")
-    writer = csv.writer(f)
-    if is_new:
-        writer.writerow(["timestamp", "source_path", "dest_path", "media_type", "category", "status", "detail"])
-    else:
-        writer.writerow([f"--- NEW RUN STARTED {datetime.now().isoformat(timespec='seconds')} (DRY_RUN={dry_run}) ---"])
-    f.flush()
-    return f, writer
-
-
-def log_row(writer, log_file_handle, source_path, dest_path, media_type, category, status, detail=""):
-    writer.writerow([datetime.now().isoformat(timespec="seconds"), str(source_path),
-                      str(dest_path) if dest_path else "", media_type, category, status, detail])
-    log_file_handle.flush()
-
-
-# ==========================================
-# IMAGE LOADING & DATE EXTRACTION
-# ==========================================
-def load_image_as_rgb(file_path: Path) -> Image.Image:
-    ext = file_path.suffix.lower()
-
-    if ext in RAW_EXTS:
-        # Layer 1: Attempt rawpy decoding (fast thumbnail or postprocess)
-        if RAW_SUPPORT:
-            try:
-                with rawpy.imread(str(file_path)) as raw:
-                    try:
-                        thumb = raw.extract_thumb()
-                        if thumb.format == rawpy.ThumbFormat.JPEG:
-                            import io
-                            img = Image.open(io.BytesIO(thumb.data)).convert("RGB")
-                            img.thumbnail((512, 512))
-                            return img
-                        elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                            img = Image.fromarray(thumb.data).convert("RGB")
-                            img.thumbnail((512, 512))
-                            return img
-                    except Exception:
-                        pass
-
-                    rgb_array = raw.postprocess(use_camera_wb=True, half_size=True)
-                    img = Image.fromarray(rgb_array)
-                    img.thumbnail((512, 512))
-                    return img
-            except Exception:
-                pass
-
-        # Layer 2: Pillow direct open fallback (decodes many DNG / TIFF formats)
-        try:
-            with Image.open(file_path) as img:
-                rgb_img = img.convert("RGB")
-                rgb_img.thumbnail((512, 512))
-                return rgb_img
-        except Exception as e:
-            raise RuntimeError(f"Could not decode RAW/DNG file: {e}")
-
-    if ext in HEIF_EXTS and not HEIF_SUPPORT:
-        raise RuntimeError("pillow-heif not installed — cannot decode HEIC files.")
-
-    with Image.open(file_path) as img:
-        rgb_img = img.convert("RGB")
-        rgb_img.thumbnail((512, 512))
-        return rgb_img
-
-
-def get_image_date(file_path: Path) -> str:
+# Hardware Acceleration Detector
+def get_hardware_info() -> tuple[str, str, bool]:
     try:
-        with Image.open(file_path) as img:
-            exif = img.getexif()
-            if exif:
-                date_val = exif.get(36867) or exif.get(306)
-                if not date_val:
-                    for tag, value in exif.items():
-                        tag_name = ExifTags.TAGS.get(tag, tag)
-                        if tag_name in ("DateTimeOriginal", "DateTime"):
-                            date_val = value
-                            break
-                if date_val:
-                    s = str(date_val).strip()
-                    dt = datetime.strptime(s[:19], "%Y:%m:%d %H:%M:%S")
-                    return dt.strftime("%Y/%Y-%m")
-    except Exception:
-        pass
-
-    return _mtime_fallback(file_path)
-
-
-def get_video_date(file_path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(file_path)],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            meta = json.loads(result.stdout)
-            tags = meta.get("format", {}).get("tags", {})
-            creation_time = tags.get("creation_time") or tags.get("com.apple.quicktime.creationdate")
-            if creation_time:
-                dt = datetime.strptime(creation_time[:19], "%Y-%m-%dT%H:%M:%S")
-                return dt.strftime("%Y/%Y-%m")
-    except Exception:
-        pass
-
-    return _mtime_fallback(file_path)
-
-
-def _mtime_fallback(file_path: Path) -> str:
-    try:
-        mtime = os.path.getmtime(file_path)
-        return datetime.fromtimestamp(mtime).strftime("%Y/%Y-%m")
-    except Exception:
-        return "Unknown_Date"
-
-
-def check_ffmpeg_available() -> bool:
-    for exe in ("ffmpeg", "ffprobe"):
-        try:
-            subprocess.run([exe, "-version"], capture_output=True, timeout=10)
-        except Exception:
-            return False
-    return True
-
-
-def extract_video_frame(file_path: Path, out_path: Path) -> bool:
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(file_path)],
-            capture_output=True, text=True, timeout=30,
-        )
-        duration = 1.0
-        if probe.returncode == 0:
-            meta = json.loads(probe.stdout)
-            duration = float(meta.get("format", {}).get("duration", 1.0))
-        seek_time = max(0.5, duration * 0.1)
-
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-ss", str(seek_time), "-i", str(file_path),
-             "-frames:v", "1", "-q:v", "2", str(out_path)],
-            capture_output=True, timeout=30,
-        )
-        return result.returncode == 0 and out_path.exists()
-    except Exception:
-        return False
-
-
-# ==========================================
-# CLIP MODEL & BATCH CLASSIFICATION
-# ==========================================
-def load_clip_model(model_name: str, device: torch.device):
-    model = CLIPModel.from_pretrained(model_name).to(device)
-    processor = CLIPProcessor.from_pretrained(model_name)
-    model.eval()
-    return model, processor
-
-
-def classify_image_batch(images: list, model, processor, categories_dict: dict,
-                         confidence_threshold: float, device: torch.device) -> list:
-    if not images:
-        return []
-    folder_names = list(categories_dict.keys())
-    text_prompts = [categories_dict[k] for k in folder_names]
-    try:
-        inputs = processor(text=text_prompts, images=images, return_tensors="pt", padding=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs)
-            probs = outputs.logits_per_image.softmax(dim=1)
-            max_probs, best_idxs = probs.max(dim=1)
-
-        results = []
-        for max_p, idx in zip(max_probs.tolist(), best_idxs.tolist()):
-            if max_p < confidence_threshold:
-                results.append("Low_Confidence")
-            else:
-                results.append(folder_names[idx])
-        return results
-    except Exception:
-        return ["Uncategorized"] * len(images)
-
-
-# ==========================================
-# FILE SYSTEM & TRANSFER HELPERS
-# ==========================================
-def should_skip_directory(dir_name: str, exclude_names: set) -> bool:
-    if dir_name.startswith("."):
-        return True
-    return dir_name.lower() in exclude_names
-
-
-def scan_drive(drive_root: Path, dest_dir: Path, user_exclude_folders: set = None):
-    dest_dir_resolved = dest_dir.resolve()
-    exclude_names = {d.lower() for d in SYSTEM_EXCLUDES}
-    if user_exclude_folders:
-        exclude_names.update({d.lower().strip() for d in user_exclude_folders if d.strip()})
-    else:
-        exclude_names.update({d.lower() for d in EXCLUDE_FOLDERS})
-
-    for root, dirs, files in os.walk(drive_root, topdown=True, followlinks=False):
-        current_path = Path(root).resolve()
-
-        if current_path == dest_dir_resolved or dest_dir_resolved in current_path.parents:
-            dirs[:] = []
-            continue
-
-        dirs[:] = [d for d in dirs if not should_skip_directory(d, exclude_names)]
-
-        for file in files:
-            file_path = current_path / file
-            ext = file_path.suffix.lower()
-            if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
-                yield file_path, (ext in IMAGE_EXTS)
-
-
-def get_base_target_dir(file_path: Path, drive_root: Path, dest_dir: Path, preserve_folders: bool) -> Path:
-    if not preserve_folders:
-        return dest_dir
-    try:
-        rel_parent = file_path.parent.resolve().relative_to(drive_root.resolve())
-    except ValueError:
-        return dest_dir
-    if str(rel_parent) == ".":
-        return dest_dir
-    return dest_dir / rel_parent
-
-
-def get_unique_target_path(target_dir: Path, filename: str) -> Path:
-    target_path = target_dir / filename
-    if not target_path.exists():
-        return target_path
-    stem, suffix = target_path.stem, target_path.suffix
-    counter = 1
-    while target_path.exists():
-        target_path = target_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-    return target_path
-
-
-def _file_hash(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        while chunk := f.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def safe_transfer(src: Path, dst: Path, action: str) -> None:
-    shutil.copy2(src, dst)
-    if action == "move":
-        if _file_hash(src) != _file_hash(dst):
-            raise IOError(f"Content hash mismatch after copy — refusing to delete original: {src}")
-        src.unlink()
-
-
-def preprocess_single_file(item, classify_videos: bool, tmp_frame_dir: Path, check_dedupe: bool):
-    file_path, is_image = item
-    pil_img = None
-    tmp_frame = None
-    media_date = "Unknown_Date"
-    err_msg = None
-    file_hash = None
-
-    try:
-        if check_dedupe:
-            file_hash = _file_hash(file_path)
-
-        if is_image:
-            pil_img = load_image_as_rgb(file_path)
-            media_date = get_image_date(file_path)
+        import torch
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            return "CUDA ACTIVE", f"{device_name} ({vram_gb:.1f} GB VRAM)", True
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "APPLE MPS", "Apple Silicon Neural Engine", True
         else:
-            media_date = get_video_date(file_path)
-            if classify_videos:
-                path_hash = hashlib.md5(str(file_path).encode()).hexdigest()[:8]
-                tmp_frame = tmp_frame_dir / f"{file_path.stem}_{path_hash}_frame.jpg"
-                if extract_video_frame(file_path, tmp_frame):
-                    pil_img = Image.open(tmp_frame).convert("RGB")
-                    pil_img.thumbnail((512, 512))
-                else:
-                    tmp_frame = None
-    except Exception as e:
-        err_msg = str(e)
-
-    return (file_path, is_image, pil_img, tmp_frame, media_date, file_hash, err_msg)
+            return "CPU MODE", "Host CPU (No GPU Acceleration)", False
+    except Exception:
+        return "CPU MODE", "Standard Host CPU", False
 
 
-# ==========================================
-# CUSTOM PASTEL ROUNDED BUTTON WIDGET
-# ==========================================
-class PastelRoundedButton(tk.Canvas):
-    def __init__(self, parent, text: str, command=None, bg_color="#e9d5ff", fg_color="#0f172a",
-                 hover_bg="#fbcfe8", active_bg="#fef08a", radius=16, border_color="#1e293b",
-                 border_width=2, font=("Segoe UI", 9, "bold"), width=190, height=38, state="normal",
-                 parent_bg=None):
-        if parent_bg is None:
-            try:
-                parent_bg = parent["bg"]
-            except Exception:
-                parent_bg = "#ffffff"
-        super().__init__(parent, width=width, height=height, bg=parent_bg, highlightthickness=0, bd=0)
-        self.command = command
-        self.text_str = text
-        self.bg_color = bg_color
-        self.hover_bg = hover_bg
-        self.active_bg = active_bg
-        self.fg_color = fg_color
-        self.border_color = border_color
-        self.border_width = border_width
-        self.radius = radius
-        self.font = font
-        self.btn_state = state
-        self.w = width
-        self.h = height
+# Category Icon & Color Metadata for Maximalist Category Matrix (Exact 1:1 match with Excel Log & Folders)
+CATEGORY_METADATA = {
+    "Flora & Plants": {"icon": "🌸", "label": "Flora & Plants", "color": "#10B981"},
+    "Vehicles & Aviation": {"icon": "✈️", "label": "Vehicles & Aviation", "color": "#3B82F6"},
+    "Animals & Wildlife": {"icon": "🐾", "label": "Animals & Wildlife", "color": "#F59E0B"},
+    "Birds & Avian": {"icon": "🐦", "label": "Birds & Avian", "color": "#06B6D4"},
+    "Portraits & People": {"icon": "👤", "label": "Portraits & People", "color": "#EC4899"},
+    "Landscapes & Nature": {"icon": "🏔️", "label": "Landscapes & Nature", "color": "#14B8A6"},
+    "Street & Urban": {"icon": "🏙️", "label": "Street & Urban", "color": "#8B5CF6"},
+    "Architecture": {"icon": "🏛️", "label": "Architecture", "color": "#6366F1"},
+    "Food & Dining": {"icon": "🍲", "label": "Food & Dining", "color": "#F97316"},
+    "Docs & Receipts": {"icon": "📄", "label": "Docs & Receipts", "color": "#64748B"},
+    "Events & Parties": {"icon": "🎉", "label": "Events & Parties", "color": "#D946EF"},
+}
 
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<ButtonPress-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
+# Theme Definitions for Dynamic Theme Engine
+THEMES = {
+    "Obsidian Glow (Dark)": {
+        "mode": "dark",
+        "bg_main": "#080B11",
+        "card_bg": "#0F172A",
+        "card_sub_bg": "#1E293B",
+        "border_color": "#1E293B",
+        "border_sub": "#334155",
+        "text_bright": "#F8FAFC",
+        "text_muted": "#94A3B8",
+        "accent_cyan": "#06B6D4",
+        "accent_purple": "#8B5CF6",
+        "accent_green": "#10B981",
+        "accent_amber": "#F59E0B",
+        "accent_red": "#EF4444",
+        "btn_dryrun": ("#7C3AED", "#6D28D9"),
+        "btn_execute": ("#059669", "#047857"),
+        "btn_unsort": ("#D97706", "#B45309"),
+        "btn_stop": ("#DC2626", "#B91C1C"),
+        "console_bg": "#020617",
+        "console_fg": "#38BDF8",
+    },
+    "Cyberpunk Neon (Dark)": {
+        "mode": "dark",
+        "bg_main": "#050508",
+        "card_bg": "#121217",
+        "card_sub_bg": "#1E1E24",
+        "border_color": "#27272A",
+        "border_sub": "#3F3F46",
+        "text_bright": "#FEF08A",
+        "text_muted": "#A1A1AA",
+        "accent_cyan": "#22D3EE",
+        "accent_purple": "#EC4899",
+        "accent_green": "#4ADE80",
+        "accent_amber": "#FACC15",
+        "accent_red": "#F43F5E",
+        "btn_dryrun": ("#EC4899", "#BE185D"),
+        "btn_execute": ("#22C55E", "#15803D"),
+        "btn_unsort": ("#EAB308", "#CA8A04"),
+        "btn_stop": ("#F43F5E", "#E11D48"),
+        "console_bg": "#09090B",
+        "console_fg": "#4ADE80",
+    },
+    "Synthwave Sunset (Dark)": {
+        "mode": "dark",
+        "bg_main": "#0D091A",
+        "card_bg": "#17122E",
+        "card_sub_bg": "#251D4A",
+        "border_color": "#332663",
+        "border_sub": "#4A398A",
+        "text_bright": "#FDF4FF",
+        "text_muted": "#C084FC",
+        "accent_cyan": "#38BDF8",
+        "accent_purple": "#D946EF",
+        "accent_green": "#34D399",
+        "accent_amber": "#FB923C",
+        "accent_red": "#F43F5E",
+        "btn_dryrun": ("#C026D3", "#A21CAF"),
+        "btn_execute": ("#2563EB", "#1D4ED8"),
+        "btn_unsort": ("#EA580C", "#C2410C"),
+        "btn_stop": ("#E11D48", "#BE123C"),
+        "console_bg": "#090614",
+        "console_fg": "#F472B6",
+    },
+    "Pastel Maximalist (Light)": {
+        "mode": "light",
+        "bg_main": "#F8FAFC",
+        "card_bg": "#FFFFFF",
+        "card_sub_bg": "#F1F5F9",
+        "border_color": "#E2E8F0",
+        "border_sub": "#CBD5E1",
+        "text_bright": "#0F172A",
+        "text_muted": "#64748B",
+        "accent_cyan": "#0284C7",
+        "accent_purple": "#7C3AED",
+        "accent_green": "#059669",
+        "accent_amber": "#D97706",
+        "accent_red": "#DC2626",
+        "btn_dryrun": ("#8B5CF6", "#7C3AED"),
+        "btn_execute": ("#10B981", "#059669"),
+        "btn_unsort": ("#F59E0B", "#D97706"),
+        "btn_stop": ("#EF4444", "#DC2626"),
+        "console_bg": "#0F172A",
+        "console_fg": "#86EFAC",
+    },
+}
 
-        self.draw(self.bg_color if state == "normal" else "#e2e8f0")
 
-    def draw(self, fill_color):
-        self.delete("all")
-        r = self.radius
-        w, h = self.w, self.h
-        bw = self.border_width
-
-        if self.btn_state == "disabled":
-            fill_c = "#e2e8f0"
-            text_c = "#94a3b8"
-            border_c = "#cbd5e1"
-        else:
-            fill_c = fill_color
-            text_c = self.fg_color
-            border_c = self.border_color
-
-        # Arcs for 4 rounded corners
-        self.create_arc(bw, bw, 2*r, 2*r, start=90, extent=90, fill=fill_c, outline=border_c, width=bw)
-        self.create_arc(w-2*r, bw, w-bw, 2*r, start=0, extent=90, fill=fill_c, outline=border_c, width=bw)
-        self.create_arc(w-2*r, h-2*r, w-bw, h-bw, start=270, extent=90, fill=fill_c, outline=border_c, width=bw)
-        self.create_arc(bw, h-2*r, 2*r, h-bw, start=180, extent=90, fill=fill_c, outline=border_c, width=bw)
-
-        # Central rectangles
-        self.create_rectangle(r, bw, w-r, h-bw, fill=fill_c, outline="")
-        self.create_rectangle(bw, r, w-bw, h-r, fill=fill_c, outline="")
-
-        # Connect outer border lines
-        self.create_line(r, bw, w-r, bw, fill=border_c, width=bw)
-        self.create_line(r, h-bw, w-r, h-bw, fill=border_c, width=bw)
-        self.create_line(bw, r, bw, h-r, fill=border_c, width=bw)
-        self.create_line(w-bw, r, w-bw, h-r, fill=border_c, width=bw)
-
-        # Centered label
-        self.create_text(w/2, h/2, text=self.text_str, fill=text_c, font=self.font)
-
-    def _on_enter(self, event):
-        if self.btn_state == "normal":
-            self.draw(self.hover_bg)
-
-    def _on_leave(self, event):
-        if self.btn_state == "normal":
-            self.draw(self.bg_color)
-
-    def _on_press(self, event):
-        if self.btn_state == "normal":
-            self.draw(self.active_bg)
-
-    def _on_release(self, event):
-        if self.btn_state == "normal":
-            self.draw(self.hover_bg)
-            if self.command:
-                self.command()
-
-    def config_state(self, state):
-        self.btn_state = state
-        self.draw(self.bg_color if state == "normal" else "#e2e8f0")
-
-
-# ==========================================
-# PASTEL DESKTOP GUI CLASS
-# ==========================================
-class PastelMediaOrganizerGUI:
-    def __init__(self, root: tk.Tk):
+class MaximalistMediaOrganizerApp:
+    def __init__(self, root: ctk.CTk):
         self.root = root
-        self.root.title("AI Media Organizer — Soft Pastel Edition")
-        self.root.geometry("1020x780")
-        self.root.minsize(860, 640)
+        self.root.title("AI Media Organizer — Neural Vision Command Center")
+        self.root.geometry("1200x880")
+        self.root.minsize(1020, 720)
 
-        # Soft Pastel Color Palette
-        self.bg_main = "#fcf9f2"         # Warm creamy pastel background
-        self.glass_card = "#ffffff"      # Solid crisp white card
-        self.border_color = "#1e293b"    # Dark slate border
-        self.fg_bright = "#0f172a"       # Deep slate text
-        self.fg_muted = "#64748b"        # Muted slate text
+        # Active Theme
+        self.current_theme_name = "Cyberpunk Neon (Dark)"
+        self.theme = THEMES[self.current_theme_name]
+        ctk.set_appearance_mode(self.theme["mode"])
+        ctk.set_default_color_theme("blue")
 
-        self.pastel_yellow = "#fef08a"   # Soft Butter Yellow
-        self.pastel_purple = "#e9d5ff"   # Soft Lavender
-        self.pastel_pink = "#fbcfe8"     # Soft Blossom Pink
-        self.pastel_blue = "#bae6fd"     # Soft Sky Blue
-        self.pastel_mint = "#bbf7d0"     # Soft Mint Green
-        self.pastel_red = "#fca5a5"      # Soft Pastel Red
-
-        self.cyan_accent = self.pastel_blue
-        self.green_accent = self.pastel_mint
-        self.red_accent = self.pastel_red
-        self.yellow_accent = self.pastel_yellow
-        self.btn_bg = self.pastel_purple
-        self.input_bg = "#ffffff"
-
-        # Configure TTK Theme Engine
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-        self.configure_pastel_styles()
-
+        # Runtime State
         self.msg_queue = queue.Queue()
         self.is_running = False
-        self.cancel_requested = False
         self.cancel_event = threading.Event()
+        self.start_time = 0.0
+        self.session_timer_id = None
+        self.current_excludes = list(sorted(EXCLUDE_FOLDERS))
+        self.stats = {
+            "discovered": 0,
+            "photos": 0,
+            "videos": 0,
+            "duplicates": 0,
+            "errors": 0,
+            "categories": {cat: 0 for cat in DEFAULT_CATEGORIES},
+        }
 
-        self.create_widgets()
+        # UI Element References for Live Updates
+        self.category_count_labels = {}
+        self.category_chip_frames = {}
+
+        self.create_maximalist_ui()
         self.root.after(100, self.process_queue)
 
-    def configure_pastel_styles(self):
-        self.root.configure(bg=self.bg_main)
-        self.style.configure(".", background=self.bg_main, foreground=self.fg_bright, font=("Segoe UI", 9, "bold"))
+    def create_maximalist_ui(self):
+        self.root.configure(fg_color=self.theme["bg_main"])
 
-        # Soft Pastel Cards & Frames
-        self.style.configure("TLabelframe", background=self.glass_card, foreground=self.fg_bright, relief="solid", borderwidth=2)
-        self.style.configure("TLabelframe.Label", background=self.glass_card, foreground=self.fg_bright, font=("Segoe UI", 11, "bold"))
-        self.style.configure("TFrame", background=self.bg_main)
-        self.style.configure("Glass.TFrame", background=self.glass_card)
-        self.style.configure("TLabel", background=self.glass_card, foreground=self.fg_bright, font=("Segoe UI", 9, "bold"))
-        self.style.configure("TCheckbutton", background=self.glass_card, foreground=self.fg_bright, font=("Segoe UI", 9, "bold"))
-        self.style.configure("TRadiobutton", background=self.glass_card, foreground=self.fg_bright, font=("Segoe UI", 9, "bold"))
+        # Main Scrollable Container
+        self.main_scroll = ctk.CTkScrollableFrame(
+            self.root,
+            fg_color=self.theme["bg_main"],
+            corner_radius=0,
+            scrollbar_button_color=self.theme["border_sub"],
+            scrollbar_button_hover_color=self.theme["accent_purple"],
+        )
+        self.main_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
-        # Header Titles
-        self.style.configure("Header.TLabel", background=self.bg_main, foreground=self.fg_bright, font=("Segoe UI", 17, "bold"))
-        self.style.configure("SubHeader.TLabel", background=self.bg_main, foreground=self.fg_muted, font=("Segoe UI", 9, "bold"))
+        # 1. Header Command Deck
+        self.build_header_deck()
 
-        # Inputs
-        self.style.configure("TEntry", fieldbackground=self.input_bg, foreground=self.fg_bright, insertcolor=self.fg_bright, bordercolor=self.border_color, borderwidth=2, relief="solid")
-        self.style.configure("TSpinbox", fieldbackground=self.input_bg, foreground=self.fg_bright, insertcolor=self.fg_bright, arrowcolor=self.fg_bright, borderwidth=2, relief="solid")
-        self.style.configure("TCombobox", fieldbackground=self.input_bg, foreground=self.fg_bright, selectbackground=self.pastel_yellow, selectforeground=self.fg_bright, arrowcolor=self.fg_bright, borderwidth=2, relief="solid")
+        # 2. Live Telemetry Metric KPI Cards
+        self.build_kpi_dashboard()
 
-        # Progressbar
-        self.style.configure("TProgressbar", thickness=16, troughcolor="#ffffff", background=self.pastel_pink, bordercolor=self.border_color, borderwidth=2)
+        # 3. Settings Deck (Directories & Neural Parameters)
+        self.build_settings_deck()
 
-    def create_widgets(self):
-        # Header Banner
-        header_frame = ttk.Frame(self.root)
-        header_frame.pack(fill="x", padx=18, pady=(12, 6))
+        # 4. Neural Classification Category Matrix
+        self.build_category_matrix()
 
-        title_sub_frame = ttk.Frame(header_frame)
-        title_sub_frame.pack(side="left")
-        ttk.Label(title_sub_frame, text="⚡ AI MEDIA ORGANIZER", style="Header.TLabel").pack(anchor="w")
-        ttk.Label(title_sub_frame, text="Zero-Shot Vision Classifier // OpenAI CLIP Engine", style="SubHeader.TLabel").pack(anchor="w")
+        # 5. Glowing Command Action Bar
+        self.build_action_bar()
 
-        # Hardware Badge
-        device_obj, device_str = get_torch_device()
-        ttk.Label(header_frame, text=f" ⚡ {device_str.upper()} ", font=("Segoe UI", 9, "bold"), background=self.green_accent, foreground="#000000", relief="solid", borderwidth=2).pack(side="right", anchor="e")
+        # 6. Neural Activity Console & Live Stream
+        self.build_console_deck()
 
-        # Card 1: Directory Selection & Exclusions
-        paths_frame = ttk.LabelFrame(self.root, text=" 📂 DIRECTORY SELECTION & EXCLUSIONS ", padding=12)
-        paths_frame.pack(fill="x", padx=18, pady=6)
+    # ==========================================
+    # 1. HEADER COMMAND DECK
+    # ==========================================
+    def build_header_deck(self):
+        header_card = ctk.CTkFrame(
+            self.main_scroll,
+            fg_color=self.theme["card_bg"],
+            corner_radius=14,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        header_card.pack(fill="x", padx=14, pady=(8, 4))
 
-        ttk.Label(paths_frame, text="Source Folder:").grid(row=0, column=0, sticky="w", pady=4)
+        header_layout = ctk.CTkFrame(header_card, fg_color="transparent")
+        header_layout.pack(fill="x", padx=14, pady=8)
+
+        # Left: Branding & Subtitle
+        title_box = ctk.CTkFrame(header_layout, fg_color="transparent")
+        title_box.pack(side="left", anchor="w")
+
+        title_row = ctk.CTkFrame(title_box, fg_color="transparent")
+        title_row.pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_row,
+            text="⚡",
+            font=ctk.CTkFont(size=20),
+            text_color=self.theme["accent_cyan"],
+        ).pack(side="left", padx=(0, 5))
+
+        ctk.CTkLabel(
+            title_row,
+            text="AI MEDIA ORGANIZER",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color=self.theme["text_bright"],
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            title_row,
+            text=" v2.5 MAXIMALIST",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["accent_purple"],
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=6,
+            padx=5,
+            pady=1,
+        ).pack(side="left", padx=(6, 0))
+
+        ctk.CTkLabel(
+            title_box,
+            text="Zero-Shot Vision Classifier // OpenAI CLIP Multi-Modal Neural Engine",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=self.theme["text_muted"],
+        ).pack(anchor="w", pady=(1, 0))
+
+        # Right: Hardware Telemetry HUD & Theme Controls
+        hud_box = ctk.CTkFrame(header_layout, fg_color="transparent")
+        hud_box.pack(side="right", anchor="e")
+
+        # Hardware Badge Pill
+        hw_tag, hw_desc, is_gpu = get_hardware_info()
+        hw_pill = ctk.CTkFrame(
+            hud_box,
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=10,
+            border_width=1,
+            border_color=self.theme["accent_green"] if is_gpu else self.theme["border_sub"],
+        )
+        hw_pill.pack(side="left", padx=(0, 8))
+
+        hw_dot = "🟢" if is_gpu else "⚪"
+        ctk.CTkLabel(
+            hw_pill,
+            text=f"{hw_dot} {hw_tag}",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color=self.theme["accent_green"] if is_gpu else self.theme["text_muted"],
+        ).pack(side="left", padx=(8, 4), pady=4)
+
+        ctk.CTkLabel(
+            hw_pill,
+            text=f"| {hw_desc}",
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left", padx=(0, 8), pady=4)
+
+        # Live Session Stopwatch
+        self.timer_pill = ctk.CTkFrame(
+            hud_box,
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=10,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        self.timer_pill.pack(side="left", padx=(0, 8))
+
+        self.timer_lbl = ctk.CTkLabel(
+            self.timer_pill,
+            text="⏱️ 00:00:00",
+            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
+            text_color=self.theme["accent_cyan"],
+        )
+        self.timer_lbl.pack(padx=8, pady=4)
+
+        # Theme Selector
+        theme_box = ctk.CTkFrame(hud_box, fg_color="transparent")
+        theme_box.pack(side="left")
+
+        ctk.CTkLabel(
+            theme_box,
+            text="🎨 Theme:",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left", padx=(0, 3))
+
+        self.theme_menu = ctk.CTkOptionMenu(
+            theme_box,
+            values=list(THEMES.keys()),
+            command=self.change_theme,
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            width=165,
+            height=26,
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            button_color=self.theme["border_sub"],
+            button_hover_color=self.theme["accent_purple"],
+            text_color=self.theme["text_bright"],
+        )
+        self.theme_menu.set(self.current_theme_name)
+        self.theme_menu.pack(side="left")
+
+    # ==========================================
+    # 2. LIVE TELEMETRY KPI CARDS BAR
+    # ==========================================
+    def build_kpi_dashboard(self):
+        kpi_container = ctk.CTkFrame(self.main_scroll, fg_color="transparent")
+        kpi_container.pack(fill="x", padx=14, pady=3)
+
+        kpis = [
+            ("📁 DISCOVERED", "0", "kpi_discovered", self.theme["accent_cyan"], "Total media queued"),
+            ("🖼️ PHOTOS", "0", "kpi_photos", self.theme["accent_green"], "Classified & copied"),
+            ("🎬 VIDEOS", "0", "kpi_videos", self.theme["accent_purple"], "Keyframe analyzed"),
+            ("⚡ SPEED", "0.0/s", "kpi_speed", self.theme["accent_amber"], "Active throughput"),
+            ("🧬 DUPLICATES", "0", "kpi_duplicates", "#EC4899", "Exact hash matches"),
+            ("🎯 ACCURACY", "--", "kpi_confidence", "#38BDF8", "Match confidence"),
+        ]
+
+        self.kpi_labels = {}
+
+        for i, (title, val, key, accent, subtitle) in enumerate(kpis):
+            card = ctk.CTkFrame(
+                kpi_container,
+                fg_color=self.theme["card_bg"],
+                corner_radius=12,
+                border_width=1,
+                border_color=self.theme["border_color"],
+            )
+            card.pack(side="left", fill="both", expand=True, padx=(0 if i == 0 else 5, 0))
+
+            card_inner = ctk.CTkFrame(card, fg_color="transparent")
+            card_inner.pack(fill="both", expand=True, padx=10, pady=7)
+
+            ctk.CTkLabel(
+                card_inner,
+                text=title,
+                font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+                text_color=self.theme["text_muted"],
+            ).pack(anchor="w")
+
+            val_lbl = ctk.CTkLabel(
+                card_inner,
+                text=val,
+                font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+                text_color=accent,
+            )
+            val_lbl.pack(anchor="w", pady=(0, 0))
+            self.kpi_labels[key] = val_lbl
+
+            ctk.CTkLabel(
+                card_inner,
+                text=subtitle,
+                font=ctk.CTkFont(family="Segoe UI", size=7),
+                text_color=self.theme["text_muted"],
+            ).pack(anchor="w")
+
+    # ==========================================
+    # 3. SETTINGS & PATHS DECK
+    # ==========================================
+    def build_settings_deck(self):
+        deck_container = ctk.CTkFrame(self.main_scroll, fg_color="transparent")
+        deck_container.pack(fill="x", padx=14, pady=2)
+
+        # Left: Directory & Exclusion Explorer
+        dir_card = ctk.CTkFrame(
+            deck_container,
+            fg_color=self.theme["card_bg"],
+            corner_radius=14,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        dir_card.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=0)
+
+        dir_inner = ctk.CTkFrame(dir_card, fg_color="transparent")
+        dir_inner.pack(fill="x", padx=12, pady=8)
+
+        # Header
+        dir_header = ctk.CTkFrame(dir_inner, fg_color="transparent")
+        dir_header.pack(fill="x", pady=(0, 3))
+
+        ctk.CTkLabel(
+            dir_header,
+            text="📂 DIRECTORY SELECTION & EXCLUSIONS",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=self.theme["text_bright"],
+        ).pack(side="left")
+
+        # Source Path
+        src_row = ctk.CTkFrame(dir_inner, fg_color="transparent")
+        src_row.pack(fill="x", pady=(0, 3))
+
+        ctk.CTkLabel(
+            src_row,
+            text="Source:",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["text_muted"],
+            width=50,
+            anchor="w",
+        ).pack(side="left")
+
         self.src_var = tk.StringVar(value="E:/")
-        ttk.Entry(paths_frame, textvariable=self.src_var, width=65).grid(row=0, column=1, padx=8, pady=4, sticky="ew")
-        PastelRoundedButton(paths_frame, text="Browse...", command=self.browse_src, bg_color=self.pastel_purple, hover_bg=self.pastel_pink, radius=12, width=95, height=30).grid(row=0, column=2, padx=4, pady=4)
+        self.src_entry = ctk.CTkEntry(
+            src_row,
+            textvariable=self.src_var,
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            border_color=self.theme["border_color"],
+            text_color=self.theme["text_bright"],
+            height=26,
+        )
+        self.src_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        ttk.Label(paths_frame, text="Destination:").grid(row=1, column=0, sticky="w", pady=4)
+        ctk.CTkButton(
+            src_row,
+            text="Browse...",
+            command=self.browse_src,
+            width=70,
+            height=26,
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            border_width=1,
+            border_color=self.theme["border_color"],
+            text_color=self.theme["text_bright"],
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+        ).pack(side="left")
+
+        # Destination Path
+        dest_row = ctk.CTkFrame(dir_inner, fg_color="transparent")
+        dest_row.pack(fill="x", pady=(0, 3))
+
+        ctk.CTkLabel(
+            dest_row,
+            text="Target:",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["text_muted"],
+            width=50,
+            anchor="w",
+        ).pack(side="left")
+
         self.dest_var = tk.StringVar(value="E:/Organized_Media")
-        ttk.Entry(paths_frame, textvariable=self.dest_var, width=65).grid(row=1, column=1, padx=8, pady=4, sticky="ew")
-        PastelRoundedButton(paths_frame, text="Browse...", command=self.browse_dest, bg_color=self.pastel_purple, hover_bg=self.pastel_pink, radius=12, width=95, height=30).grid(row=1, column=2, padx=4, pady=4)
+        self.dest_entry = ctk.CTkEntry(
+            dest_row,
+            textvariable=self.dest_var,
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            border_color=self.theme["border_color"],
+            text_color=self.theme["text_bright"],
+            height=26,
+        )
+        self.dest_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        ttk.Label(paths_frame, text="Exclude Folders:").grid(row=2, column=0, sticky="w", pady=4)
-        default_excludes_str = ", ".join(sorted(EXCLUDE_FOLDERS))
-        self.exclude_var = tk.StringVar(value=default_excludes_str)
-        ttk.Entry(paths_frame, textvariable=self.exclude_var, width=65).grid(row=2, column=1, padx=8, pady=4, sticky="ew")
-        ttk.Label(paths_frame, text="(comma-separated)", font=("Segoe UI", 8, "italic"), foreground=self.fg_muted).grid(row=2, column=2, sticky="w", pady=4)
+        ctk.CTkButton(
+            dest_row,
+            text="Browse...",
+            command=self.browse_dest,
+            width=70,
+            height=26,
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            border_width=1,
+            border_color=self.theme["border_color"],
+            text_color=self.theme["text_bright"],
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+        ).pack(side="left", padx=(0, 3))
 
-        paths_frame.columnconfigure(1, weight=1)
+        ctk.CTkButton(
+            dest_row,
+            text="📂",
+            command=self.open_dest_in_explorer,
+            width=28,
+            height=26,
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            border_width=1,
+            border_color=self.theme["border_color"],
+            text_color=self.theme["accent_cyan"],
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left")
 
-        # Card 2: Organizer Settings
-        settings_frame = ttk.LabelFrame(self.root, text=" ⚙️ ORGANIZER & AI SETTINGS ", padding=12)
-        settings_frame.pack(fill="x", padx=18, pady=6)
+        # Excluded Folders Header Line with Add & Reset
+        excl_header = ctk.CTkFrame(dir_inner, fg_color="transparent")
+        excl_header.pack(fill="x", pady=(2, 2))
 
-        # Row 0: Action Mode & Confidence
-        ttk.Label(settings_frame, text="Action Mode:").grid(row=0, column=0, sticky="w", pady=4)
-        self.action_var = tk.StringVar(value="copy")
-        ttk.Radiobutton(settings_frame, text="Copy (Safe)", variable=self.action_var, value="copy").grid(row=0, column=1, sticky="w")
-        ttk.Radiobutton(settings_frame, text="Move (Verified Hash Delete)", variable=self.action_var, value="move").grid(row=0, column=2, sticky="w")
+        ctk.CTkLabel(
+            excl_header,
+            text="Excluded Folders:",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left", padx=(0, 4))
 
-        ttk.Label(settings_frame, text="Confidence Thresh:").grid(row=0, column=3, sticky="w", padx=(20, 5))
-        self.confidence_var = tk.DoubleVar(value=0.35)
-        conf_spin = ttk.Spinbox(settings_frame, from_=0.0, to=1.0, increment=0.05, textvariable=self.confidence_var, width=6)
-        conf_spin.grid(row=0, column=4, sticky="w")
+        self.new_tag_var = tk.StringVar()
+        self.new_tag_entry = ctk.CTkEntry(
+            excl_header,
+            textvariable=self.new_tag_var,
+            placeholder_text="Add folder...",
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            corner_radius=6,
+            fg_color=self.theme["card_sub_bg"],
+            border_color=self.theme["border_color"],
+            text_color=self.theme["text_bright"],
+            height=24,
+            width=110,
+        )
+        self.new_tag_entry.pack(side="left", padx=(0, 3))
+        self.new_tag_entry.bind("<Return>", lambda e: self.add_exclusion_tag())
 
-        # Row 1: Execution Mode & Threads
-        self.execute_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="Execute Transfers (Uncheck for Dry Run)", variable=self.execute_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        ctk.CTkButton(
+            excl_header,
+            text="+ Add",
+            command=self.add_exclusion_tag,
+            width=48,
+            height=24,
+            corner_radius=6,
+            fg_color=self.theme["accent_purple"],
+            hover_color="#7C3AED",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+        ).pack(side="left", padx=(0, 4))
 
-        ttk.Label(settings_frame, text="Batch Size:").grid(row=1, column=2, sticky="w")
-        self.batch_var = tk.IntVar(value=16)
-        ttk.Spinbox(settings_frame, from_=1, to=128, increment=4, textvariable=self.batch_var, width=6).grid(row=1, column=3, sticky="w")
+        ctk.CTkButton(
+            excl_header,
+            text="Reset",
+            command=self.reset_exclusions,
+            font=ctk.CTkFont(family="Segoe UI", size=8),
+            height=24,
+            width=44,
+            corner_radius=6,
+            fg_color=self.theme["card_sub_bg"],
+            text_color=self.theme["accent_cyan"],
+            hover_color=self.theme["border_sub"],
+        ).pack(side="right")
 
-        ttk.Label(settings_frame, text="Worker Threads:").grid(row=1, column=4, sticky="w", padx=(10, 5))
-        self.threads_var = tk.IntVar(value=4)
-        ttk.Spinbox(settings_frame, from_=1, to=16, increment=1, textvariable=self.threads_var, width=6).grid(row=1, column=5, sticky="w")
+        # Single Row Horizontal Scrollable Tag Strip
+        self.tags_frame = ctk.CTkScrollableFrame(
+            dir_inner,
+            orientation="horizontal",
+            height=28,
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=6,
+            border_width=1,
+            border_color=self.theme["border_color"],
+            scrollbar_button_color=self.theme["border_sub"],
+            scrollbar_button_hover_color=self.theme["accent_purple"],
+        )
+        self.tags_frame.pack(fill="x", pady=(0, 0))
 
-        # Row 2: Options Checkboxes
+        self.render_exclusion_tags()
+
+        # Right: Vision AI & Neural Engine Parameters
+        ai_card = ctk.CTkFrame(
+            deck_container,
+            fg_color=self.theme["card_bg"],
+            corner_radius=14,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        ai_card.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=0)
+
+        ai_inner = ctk.CTkFrame(ai_card, fg_color="transparent")
+        ai_inner.pack(fill="x", padx=12, pady=8)
+
+        # Header
+        ctk.CTkLabel(
+            ai_inner,
+            text="⚙️ VISION AI & ENGINE PARAMETERS",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=self.theme["text_bright"],
+        ).pack(anchor="w", pady=(0, 3))
+
+        # Row 1: Mode + Model (Side by Side)
+        mode_model_row = ctk.CTkFrame(ai_inner, fg_color="transparent")
+        mode_model_row.pack(fill="x", pady=(0, 3))
+
+        self.action_segmented = ctk.CTkSegmentedButton(
+            mode_model_row,
+            values=["🛡️ Copy (Safe)", "⚡ Move (Hash Delete)"],
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            corner_radius=8,
+            selected_color=self.theme["accent_purple"],
+            selected_hover_color="#7C3AED",
+            unselected_color=self.theme["card_sub_bg"],
+            unselected_hover_color=self.theme["border_sub"],
+            text_color=self.theme["text_bright"],
+            height=26,
+            width=210,
+        )
+        self.action_segmented.set("🛡️ Copy (Safe)")
+        self.action_segmented.pack(side="left", padx=(0, 6))
+
+        self.model_var = tk.StringVar(value="openai/clip-vit-large-patch14-336")
+        self.model_combo = ctk.CTkOptionMenu(
+            mode_model_row,
+            values=[
+                "openai/clip-vit-large-patch14-336",
+                "openai/clip-vit-large-patch14",
+                "openai/clip-vit-base-patch32",
+            ],
+            variable=self.model_var,
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            corner_radius=8,
+            fg_color=self.theme["card_sub_bg"],
+            button_color=self.theme["border_sub"],
+            button_hover_color=self.theme["accent_purple"],
+            text_color=self.theme["text_bright"],
+            height=26,
+        )
+        self.model_combo.pack(side="left", fill="x", expand=True)
+
+        # Row 2: Confidence Threshold
+        conf_row = ctk.CTkFrame(ai_inner, fg_color="transparent")
+        conf_row.pack(fill="x", pady=(0, 2))
+
+        ctk.CTkLabel(
+            conf_row,
+            text="Confidence Threshold:",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left")
+
+        self.conf_val_lbl = ctk.CTkLabel(
+            conf_row,
+            text="35%",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["accent_cyan"],
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=4,
+            padx=4,
+            pady=0,
+        )
+        self.conf_val_lbl.pack(side="right")
+
+        self.confidence_slider = ctk.CTkSlider(
+            ai_inner,
+            from_=0.05,
+            to=0.95,
+            number_of_steps=18,
+            command=self._on_conf_change,
+            height=11,
+            button_color=self.theme["accent_cyan"],
+            button_hover_color="#0891B2",
+            progress_color=self.theme["accent_cyan"],
+            fg_color=self.theme["card_sub_bg"],
+        )
+        self.confidence_slider.set(0.35)
+        self.confidence_slider.pack(fill="x", pady=(0, 3))
+
+        # Row 3: Dual Steppers: Batch & Threads
+        sliders_grid = ctk.CTkFrame(ai_inner, fg_color="transparent")
+        sliders_grid.pack(fill="x", pady=(0, 3))
+
+        # Batch Size
+        b_box = ctk.CTkFrame(sliders_grid, fg_color="transparent")
+        b_box.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        b_hdr = ctk.CTkFrame(b_box, fg_color="transparent")
+        b_hdr.pack(fill="x")
+        ctk.CTkLabel(
+            b_hdr,
+            text="Batch Size:",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left")
+
+        self.batch_lbl = ctk.CTkLabel(
+            b_hdr,
+            text="16",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["accent_purple"],
+        )
+        self.batch_lbl.pack(side="right")
+
+        self.batch_slider = ctk.CTkSlider(
+            b_box,
+            from_=1,
+            to=64,
+            number_of_steps=63,
+            command=lambda v: self.batch_lbl.configure(text=str(int(v))),
+            height=11,
+            button_color=self.theme["accent_purple"],
+            progress_color=self.theme["accent_purple"],
+            fg_color=self.theme["card_sub_bg"],
+        )
+        self.batch_slider.set(16)
+        self.batch_slider.pack(fill="x", pady=(1, 0))
+
+        # Threads
+        t_box = ctk.CTkFrame(sliders_grid, fg_color="transparent")
+        t_box.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        t_hdr = ctk.CTkFrame(t_box, fg_color="transparent")
+        t_hdr.pack(fill="x")
+        ctk.CTkLabel(
+            t_hdr,
+            text="Worker Threads:",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_muted"],
+        ).pack(side="left")
+
+        self.threads_lbl = ctk.CTkLabel(
+            t_hdr,
+            text="4",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["accent_green"],
+        )
+        self.threads_lbl.pack(side="right")
+
+        self.threads_slider = ctk.CTkSlider(
+            t_box,
+            from_=1,
+            to=16,
+            number_of_steps=15,
+            command=lambda v: self.threads_lbl.configure(text=str(int(v))),
+            height=11,
+            button_color=self.theme["accent_green"],
+            progress_color=self.theme["accent_green"],
+            fg_color=self.theme["card_sub_bg"],
+        )
+        self.threads_slider.set(4)
+        self.threads_slider.pack(fill="x", pady=(1, 0))
+
+        # Row 4: Switches
+        switches_box = ctk.CTkFrame(ai_inner, fg_color="transparent")
+        switches_box.pack(fill="x", pady=(2, 0))
+
         self.classify_videos_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Classify Videos via Frame Extraction", variable=self.classify_videos_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
+        self.sw_video = ctk.CTkSwitch(
+            switches_box,
+            text="🎥 Videos",
+            variable=self.classify_videos_var,
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_bright"],
+            progress_color=self.theme["accent_cyan"],
+        )
+        self.sw_video.pack(side="left", padx=(0, 6))
 
         self.dedupe_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="Deduplicate (Route exact MD5 matches to Duplicates/)", variable=self.dedupe_var).grid(row=2, column=2, columnspan=2, sticky="w", pady=4)
+        self.sw_dedupe = ctk.CTkSwitch(
+            switches_box,
+            text="🧬 Dedupe",
+            variable=self.dedupe_var,
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_bright"],
+            progress_color=self.theme["accent_purple"],
+        )
+        self.sw_dedupe.pack(side="left", padx=(0, 6))
 
         self.preserve_folders_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Preserve Subfolders", variable=self.preserve_folders_var).grid(row=2, column=4, columnspan=2, sticky="w", pady=4)
+        self.sw_preserve = ctk.CTkSwitch(
+            switches_box,
+            text="📁 Subfolders",
+            variable=self.preserve_folders_var,
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["text_bright"],
+            progress_color=self.theme["accent_green"],
+        )
+        self.sw_preserve.pack(side="left")
 
-        # Row 3: Model Selector
-        ttk.Label(settings_frame, text="CLIP Model:").grid(row=3, column=0, sticky="w", pady=4)
-        self.model_var = tk.StringVar(value="openai/clip-vit-large-patch14-336")
-        model_combo = ttk.Combobox(settings_frame, textvariable=self.model_var, values=["openai/clip-vit-large-patch14-336", "openai/clip-vit-large-patch14", "openai/clip-vit-base-patch32"], width=35, state="readonly")
-        model_combo.grid(row=3, column=1, columnspan=3, sticky="w", pady=4)
+    def _on_conf_change(self, val):
+        self.conf_val_lbl.configure(text=f"{int(val * 100)}%")
 
-        # Control Bar with Custom Rounded Pastel Buttons
-        ctrl_frame = tk.Frame(self.root, bg=self.bg_main)
-        ctrl_frame.pack(fill="x", padx=18, pady=10)
+    # ==========================================
+    # 4. NEURAL CATEGORY MATRIX CHIPS
+    # ==========================================
+    def build_category_matrix(self):
+        cat_card = ctk.CTkFrame(
+            self.main_scroll,
+            fg_color=self.theme["card_bg"],
+            corner_radius=14,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        cat_card.pack(fill="x", padx=14, pady=2)
 
-        self.dry_run_btn = PastelRoundedButton(ctrl_frame, text="🧪 RUN DRY RUN (PREVIEW)", command=lambda: self.start_organization(dry_run_override=True), bg_color=self.pastel_purple, hover_bg=self.pastel_pink, active_bg=self.pastel_yellow, radius=18, width=200, height=42, parent_bg=self.bg_main)
-        self.dry_run_btn.pack(side="left", padx=4)
+        cat_inner = ctk.CTkFrame(cat_card, fg_color="transparent")
+        cat_inner.pack(fill="x", padx=12, pady=6)
 
-        self.execute_btn = PastelRoundedButton(ctrl_frame, text="⚡ EXECUTE FILE TRANSFERS", command=lambda: self.start_organization(dry_run_override=False), bg_color=self.pastel_mint, hover_bg=self.pastel_yellow, active_bg=self.pastel_blue, radius=18, width=200, height=42, parent_bg=self.bg_main)
-        self.execute_btn.pack(side="left", padx=4)
+        cat_hdr = ctk.CTkFrame(cat_inner, fg_color="transparent")
+        cat_hdr.pack(fill="x", pady=(0, 5))
 
-        self.unsort_btn = PastelRoundedButton(ctrl_frame, text="⏮ UNSORT & RESTORE", command=self.start_unsort, bg_color=self.pastel_yellow, hover_bg=self.pastel_pink, active_bg=self.pastel_blue, radius=18, width=170, height=42, parent_bg=self.bg_main)
-        self.unsort_btn.pack(side="left", padx=4)
+        ctk.CTkLabel(
+            cat_hdr,
+            text="🏷️ NEURAL CLASSIFICATION MATRIX & LIVE DISPATCH COUNTERS",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color=self.theme["text_bright"],
+        ).pack(side="left")
 
-        self.stop_btn = PastelRoundedButton(ctrl_frame, text="⏹ STOP", command=self.stop_organization, bg_color=self.pastel_red, hover_bg="#f87171", active_bg="#ef4444", radius=18, width=95, height=42, state="disabled", parent_bg=self.bg_main)
-        self.stop_btn.pack(side="left", padx=4)
+        ctk.CTkLabel(
+            cat_hdr,
+            text="11 Active Classes",
+            font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+            text_color=self.theme["accent_cyan"],
+            fg_color=self.theme["card_sub_bg"],
+            corner_radius=5,
+            padx=5,
+            pady=1,
+        ).pack(side="right")
 
-        # Progress & Console Log Panel
-        progress_frame = ttk.LabelFrame(self.root, text=" 📊 PROGRESS & ACTIVITY CONSOLE ", padding=12)
-        progress_frame.pack(fill="both", expand=True, padx=18, pady=(4, 12))
+        chips_frame = ctk.CTkFrame(cat_inner, fg_color="transparent")
+        chips_frame.pack(fill="x")
 
-        self.pbar = ttk.Progressbar(progress_frame, mode="determinate")
-        self.pbar.pack(fill="x", pady=4)
+        cols = 4
+        for idx, (cat_key, meta) in enumerate(CATEGORY_METADATA.items()):
+            row_idx = idx // cols
+            col_idx = idx % cols
 
-        self.status_lbl = ttk.Label(progress_frame, text="SYSTEM READY. SELECT SOURCE AND DESTINATION FOLDERS TO BEGIN.", font=("Segoe UI", 9, "bold"), foreground=self.fg_muted)
-        self.status_lbl.pack(anchor="w", pady=2)
+            chip = ctk.CTkFrame(
+                chips_frame,
+                fg_color=self.theme["card_sub_bg"],
+                corner_radius=8,
+                border_width=1,
+                border_color=self.theme["border_color"],
+                height=26,
+            )
+            chip.grid(row=row_idx, column=col_idx, padx=3, pady=2, sticky="ew")
+            chips_frame.columnconfigure(col_idx, weight=1)
 
-        # High-Tech Soft Slate Terminal Console Log
-        self.log_text = scrolledtext.ScrolledText(progress_frame, height=12, bg="#0f172a", fg="#86efac", font=("Consolas", 9, "bold"), insertbackground=self.cyan_accent, relief="solid", borderwidth=2)
-        self.log_text.pack(fill="both", expand=True, pady=5)
-        self.log_text.tag_config("OK", foreground=self.green_accent)
-        self.log_text.tag_config("ERROR", foreground=self.red_accent)
-        self.log_text.tag_config("WARN", foreground=self.yellow_accent)
-        self.log_text.tag_config("INFO", foreground=self.cyan_accent)
-        self.log_text.tag_config("PURPLE", foreground=self.pastel_purple)
+            chip_layout = ctk.CTkFrame(chip, fg_color="transparent")
+            chip_layout.pack(fill="x", padx=6, pady=3)
 
+            ctk.CTkLabel(
+                chip_layout,
+                text=f"{meta['icon']} {meta['label']}",
+                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+                text_color=self.theme["text_bright"],
+            ).pack(side="left")
+
+            count_lbl = ctk.CTkLabel(
+                chip_layout,
+                text="0",
+                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+                text_color=meta["color"],
+                fg_color=self.theme["card_bg"],
+                corner_radius=4,
+                padx=5,
+                pady=1,
+            )
+            count_lbl.pack(side="right")
+
+            self.category_count_labels[cat_key] = count_lbl
+            self.category_chip_frames[cat_key] = chip
+
+    # ==========================================
+    # 5. CONTROL ACTION COMMAND DECK
+    # ==========================================
+    def build_action_bar(self):
+        act_container = ctk.CTkFrame(self.main_scroll, fg_color="transparent")
+        act_container.pack(fill="x", padx=14, pady=5)
+
+        self.dryrun_btn = ctk.CTkButton(
+            act_container,
+            text="🧪 RUN DRY RUN (PREVIEW)",
+            command=lambda: self.start_organization(dry_run_override=True),
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            height=38,
+            corner_radius=10,
+            fg_color=self.theme["btn_dryrun"][0],
+            hover_color=self.theme["btn_dryrun"][1],
+            text_color="#FFFFFF",
+        )
+        self.dryrun_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.execute_btn = ctk.CTkButton(
+            act_container,
+            text="⚡ EXECUTE FILE TRANSFERS",
+            command=lambda: self.start_organization(dry_run_override=False),
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            height=38,
+            corner_radius=10,
+            fg_color=self.theme["btn_execute"][0],
+            hover_color=self.theme["btn_execute"][1],
+            text_color="#FFFFFF",
+        )
+        self.execute_btn.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.unsort_btn = ctk.CTkButton(
+            act_container,
+            text="⏮️ UNSORT & RESTORE",
+            command=self.start_unsort,
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            height=38,
+            corner_radius=10,
+            fg_color=self.theme["btn_unsort"][0],
+            hover_color=self.theme["btn_unsort"][1],
+            text_color="#FFFFFF",
+        )
+        self.unsort_btn.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.stop_btn = ctk.CTkButton(
+            act_container,
+            text="🛑 CANCEL / STOP",
+            command=self.stop_organization,
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            height=38,
+            corner_radius=10,
+            fg_color=self.theme["btn_stop"][0],
+            hover_color=self.theme["btn_stop"][1],
+            text_color="#FFFFFF",
+            state="disabled",
+        )
+        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+    # ==========================================
+    # 6. NEURAL ACTIVITY CONSOLE & LIVE STREAM
+    # ==========================================
+    def build_console_deck(self):
+        console_card = ctk.CTkFrame(
+            self.main_scroll,
+            fg_color=self.theme["card_bg"],
+            corner_radius=14,
+            border_width=1,
+            border_color=self.theme["border_color"],
+        )
+        console_card.pack(fill="both", expand=True, padx=14, pady=(2, 10))
+
+        console_inner = ctk.CTkFrame(console_card, fg_color="transparent")
+        console_inner.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # Progress Bar
+        self.pbar = ctk.CTkProgressBar(
+            console_inner,
+            height=10,
+            corner_radius=5,
+            progress_color=self.theme["accent_cyan"],
+            fg_color=self.theme["card_sub_bg"],
+        )
+        self.pbar.set(0)
+        self.pbar.pack(fill="x", pady=(0, 6))
+
+        # Status Strip
+        status_strip = ctk.CTkFrame(console_inner, fg_color="transparent")
+        status_strip.pack(fill="x", pady=(0, 5))
+
+        self.status_lbl = ctk.CTkLabel(
+            status_strip,
+            text="🟢 SYSTEM READY // SELECT SOURCE AND DESTINATION FOLDERS TO BEGIN.",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=self.theme["text_muted"],
+        )
+        self.status_lbl.pack(side="left")
+
+        # Toolbar
+        ctk.CTkButton(
+            status_strip,
+            text="📂 Open Log CSV",
+            command=self.open_log_csv,
+            font=ctk.CTkFont(family="Segoe UI", size=8),
+            height=20,
+            width=75,
+            corner_radius=5,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            text_color=self.theme["accent_cyan"],
+        ).pack(side="right", padx=(3, 0))
+
+        ctk.CTkButton(
+            status_strip,
+            text="📋 Copy Log",
+            command=self.copy_log_to_clipboard,
+            font=ctk.CTkFont(family="Segoe UI", size=8),
+            height=20,
+            width=65,
+            corner_radius=5,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            text_color=self.theme["text_bright"],
+        ).pack(side="right", padx=(3, 0))
+
+        ctk.CTkButton(
+            status_strip,
+            text="🧹 Clear",
+            command=self.clear_console,
+            font=ctk.CTkFont(family="Segoe UI", size=8),
+            height=20,
+            width=50,
+            corner_radius=5,
+            fg_color=self.theme["card_sub_bg"],
+            hover_color=self.theme["border_sub"],
+            text_color=self.theme["text_bright"],
+        ).pack(side="right")
+
+        # Monospace Terminal
+        self.log_text = scrolledtext.ScrolledText(
+            console_inner,
+            height=8,
+            bg=self.theme["console_bg"],
+            fg=self.theme["console_fg"],
+            font=("Consolas", 9),
+            insertbackground=self.theme["accent_cyan"],
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=6,
+        )
+        self.log_text.pack(fill="both", expand=True)
+
+        self.setup_console_tags()
+
+    def setup_console_tags(self):
+        self.log_text.tag_config("OK", foreground=self.theme["accent_green"])
+        self.log_text.tag_config("ERROR", foreground=self.theme["accent_red"])
+        self.log_text.tag_config("WARN", foreground=self.theme["accent_amber"])
+        self.log_text.tag_config("INFO", foreground=self.theme["accent_cyan"])
+        self.log_text.tag_config("PURPLE", foreground=self.theme["accent_purple"])
+        self.log_text.tag_config("SUCCESS", foreground="#4ADE80")
+
+    # ==========================================
+    # EXCLUSION TAG CLOUD LOGIC (Single Row Horizontal Strip)
+    # ==========================================
+    def render_exclusion_tags(self):
+        for widget in self.tags_frame.winfo_children():
+            widget.destroy()
+
+        for folder_name in self.current_excludes:
+            tag_chip = ctk.CTkFrame(
+                self.tags_frame,
+                fg_color=self.theme["card_bg"],
+                corner_radius=5,
+                border_width=1,
+                border_color=self.theme["border_color"],
+            )
+            tag_chip.pack(side="left", padx=2, pady=1)
+
+            ctk.CTkLabel(
+                tag_chip,
+                text=folder_name,
+                font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+                text_color=self.theme["text_muted"],
+            ).pack(side="left", padx=(4, 1), pady=1)
+
+            del_btn = ctk.CTkButton(
+                tag_chip,
+                text="×",
+                width=14,
+                height=14,
+                corner_radius=3,
+                fg_color="transparent",
+                hover_color=self.theme["border_sub"],
+                text_color=self.theme["accent_red"],
+                font=ctk.CTkFont(size=10, weight="bold"),
+                command=lambda f=folder_name: self.remove_exclusion_tag(f),
+            )
+            del_btn.pack(side="left", padx=(0, 3), pady=1)
+
+    def add_exclusion_tag(self):
+        new_tag = self.new_tag_var.get().strip()
+        if new_tag and new_tag not in self.current_excludes:
+            self.current_excludes.append(new_tag)
+            self.new_tag_var.set("")
+            self.render_exclusion_tags()
+
+    def remove_exclusion_tag(self, folder_name: str):
+        if folder_name in self.current_excludes:
+            self.current_excludes.remove(folder_name)
+            self.render_exclusion_tags()
+
+    def reset_exclusions(self):
+        self.current_excludes = list(sorted(EXCLUDE_FOLDERS))
+        self.render_exclusion_tags()
+
+    # ==========================================
+    # THEME SWITCHER
+    # ==========================================
+    def change_theme(self, theme_name: str):
+        if theme_name in THEMES:
+            self.current_theme_name = theme_name
+            self.theme = THEMES[theme_name]
+            ctk.set_appearance_mode(self.theme["mode"])
+
+            for widget in self.root.winfo_children():
+                widget.destroy()
+            self.create_maximalist_ui()
+            self.append_log(f"Theme switched to: {theme_name}", "INFO")
+
+    # ==========================================
+    # BROWSE & HELPER ACTIONS
+    # ==========================================
     def browse_src(self):
         d = filedialog.askdirectory(initialdir=self.src_var.get())
         if d:
@@ -700,134 +1159,332 @@ class PastelMediaOrganizerGUI:
         if d:
             self.dest_var.set(d)
 
+    def open_dest_in_explorer(self):
+        dest = Path(self.dest_var.get())
+        if dest.exists():
+            subprocess.run(["explorer", str(dest.resolve())])
+        else:
+            messagebox.showinfo("Folder Not Found", f"Destination folder does not exist yet:\n{dest}")
+
+    def open_log_csv(self):
+        dest = Path(self.dest_var.get())
+        log_file = dest / "_organizer_log.csv"
+        if log_file.exists():
+            subprocess.run(["explorer", str(log_file.resolve())])
+        else:
+            messagebox.showinfo("Log File", f"No log file found yet at:\n{log_file}")
+
+    def clear_console(self):
+        self.log_text.delete("1.0", tk.END)
+
+    def copy_log_to_clipboard(self):
+        content = self.log_text.get("1.0", tk.END).strip()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        messagebox.showinfo("Clipboard", "Console log copied to clipboard!")
+
     def append_log(self, text: str, tag: str = "INFO"):
         self.log_text.insert(tk.END, text + "\n", tag)
         self.log_text.see(tk.END)
 
+    # ==========================================
+    # SESSION TIMER & REAL-TIME QUEUE PROCESSING
+    # ==========================================
+    def update_session_timer(self):
+        if self.is_running:
+            elapsed = time.time() - self.start_time
+            hrs = int(elapsed // 3600)
+            mins = int((elapsed % 3600) // 60)
+            secs = int(elapsed % 60)
+            self.timer_lbl.configure(text=f"⏱️ {hrs:02d}:{mins:02d}:{secs:02d}")
+            self.session_timer_id = self.root.after(1000, self.update_session_timer)
+
     def process_queue(self):
         while not self.msg_queue.empty():
             msg_type, content = self.msg_queue.get()
-            if msg_type == "LOG":
+
+            # 1. Direct STATS Message from Worker
+            if msg_type == "STATS":
+                stats_dict = content
+                if isinstance(stats_dict, dict):
+                    if "total_discovered" in stats_dict:
+                        self.stats["discovered"] = stats_dict["total_discovered"]
+                        self.kpi_labels["kpi_discovered"].configure(text=str(stats_dict["total_discovered"]))
+                    if "photos_count" in stats_dict:
+                        self.stats["photos"] = stats_dict["photos_count"]
+                        self.kpi_labels["kpi_photos"].configure(text=str(stats_dict["photos_count"]))
+                    if "videos_count" in stats_dict:
+                        self.stats["videos"] = stats_dict["videos_count"]
+                        self.kpi_labels["kpi_videos"].configure(text=str(stats_dict["videos_count"]))
+                    if "duplicates_count" in stats_dict:
+                        self.stats["duplicates"] = stats_dict["duplicates_count"]
+                        self.kpi_labels["kpi_duplicates"].configure(text=str(stats_dict["duplicates_count"]))
+
+                    for cat, cnt in stats_dict.get("categories", {}).items():
+                        norm_cat = normalize_category_name(cat)
+                        self.stats["categories"][norm_cat] = cnt
+                        if norm_cat in self.category_count_labels:
+                            self.category_count_labels[norm_cat].configure(text=str(cnt))
+                            if cnt > 0 and norm_cat in self.category_chip_frames:
+                                self.category_chip_frames[norm_cat].configure(border_color=self.theme["accent_cyan"])
+
+            # 2. LOG Message
+            elif msg_type == "LOG":
                 tag, text = content
                 self.append_log(text, tag)
+
+                # Fallback parser for discovery count
+                if "Discovered " in text and "candidate media files" in text:
+                    try:
+                        num = int(text.split("Discovered ")[1].split(" candidate")[0].strip())
+                        self.stats["discovered"] = num
+                        self.kpi_labels["kpi_discovered"].configure(text=str(num))
+                    except Exception:
+                        pass
+
+                # Fallback parser for single file transfer
+                if " ➔ " in text and ("PHOTO" in text or "VIDEO" in text):
+                    dest_cat = normalize_category_name(text.split(" ➔ ")[-1].strip())
+                    if "PHOTO" in text:
+                        self.stats["photos"] += 1
+                        self.kpi_labels["kpi_photos"].configure(text=str(self.stats["photos"]))
+                    elif "VIDEO" in text:
+                        self.stats["videos"] += 1
+                        self.kpi_labels["kpi_videos"].configure(text=str(self.stats["videos"]))
+
+                    if dest_cat in self.category_count_labels:
+                        self.stats["categories"][dest_cat] = self.stats["categories"].get(dest_cat, 0) + 1
+                        self.category_count_labels[dest_cat].configure(text=str(self.stats["categories"][dest_cat]))
+                        if dest_cat in self.category_chip_frames:
+                            self.category_chip_frames[dest_cat].configure(border_color=self.theme["accent_cyan"])
+
+            # 3. Real-Time PROGRESS Message
             elif msg_type == "PROGRESS":
-                current, total, status = content
+                live_stats = None
+                if len(content) == 4:
+                    current, total, status, live_stats = content
+                elif len(content) == 3:
+                    current, total, status = content
+                else:
+                    current, total = content[:2]
+                    status = "Processing..."
+
                 if total > 0:
-                    self.pbar["maximum"] = total
-                    self.pbar["value"] = current
-                self.status_lbl.config(text=status)
+                    prog_val = min(1.0, current / total)
+                    self.pbar.set(prog_val)
+                    self.status_lbl.configure(text=f"⚡ {status} ({current}/{total} - {int(prog_val*100)}%)")
+
+                    # Live Speed & ETA Calculation
+                    elapsed = max(0.1, time.time() - self.start_time)
+                    speed = current / elapsed
+                    eta_secs = int((total - current) / max(0.1, speed))
+                    eta_str = f"{eta_secs//60:02d}:{eta_secs%60:02d}" if speed > 0 else "--:--"
+                    self.kpi_labels["kpi_speed"].configure(text=f"{speed:.1f}/s (ETA {eta_str})")
+                else:
+                    self.status_lbl.configure(text=f"● {status}")
+
+                # Update live KPI cards & neural matrix immediately
+                if live_stats and isinstance(live_stats, dict):
+                    disc = live_stats.get("total_discovered", total)
+                    photos = live_stats.get("photos_count", 0)
+                    videos = live_stats.get("videos_count", 0)
+                    dupes = live_stats.get("duplicates_count", 0)
+                    errs = live_stats.get("error_count", 0)
+
+                    self.stats["discovered"] = disc
+                    self.stats["photos"] = photos
+                    self.stats["videos"] = videos
+                    self.stats["duplicates"] = dupes
+                    self.stats["errors"] = errs
+
+                    self.kpi_labels["kpi_discovered"].configure(text=str(disc))
+                    self.kpi_labels["kpi_photos"].configure(text=str(photos))
+                    self.kpi_labels["kpi_videos"].configure(text=str(videos))
+                    self.kpi_labels["kpi_duplicates"].configure(text=str(dupes))
+
+                    tot_done = photos + videos
+                    if tot_done > 0:
+                        acc = max(0.0, (tot_done - errs) / tot_done * 100)
+                        self.kpi_labels["kpi_confidence"].configure(text=f"{acc:.1f}%")
+
+                    cats = live_stats.get("categories", {})
+                    for cat, cnt in cats.items():
+                        norm_cat = normalize_category_name(cat)
+                        self.stats["categories"][norm_cat] = cnt
+                        if norm_cat in self.category_count_labels:
+                            self.category_count_labels[norm_cat].configure(text=str(cnt))
+                            if cnt > 0 and norm_cat in self.category_chip_frames:
+                                self.category_chip_frames[norm_cat].configure(border_color=self.theme["accent_cyan"])
+
+            # 4. DONE Message
             elif msg_type == "DONE":
-                stats, dry_run, log_file, checkpoint_file = content
+                stats, success_or_dryrun, log_file, checkpoint_file = content
                 self.is_running = False
-                self.dry_run_btn.config_state("normal")
-                self.execute_btn.config_state("normal")
-                self.unsort_btn.config_state("normal")
-                self.stop_btn.config_state("disabled")
-                self.append_log("\n=== PROCESS COMPLETED ===", "PURPLE")
-                if stats:
-                    self.show_summary_dialog(stats, dry_run, log_file, checkpoint_file)
+                self.dryrun_btn.configure(state="normal")
+                self.execute_btn.configure(state="normal")
+                self.unsort_btn.configure(state="normal")
+                self.stop_btn.configure(state="disabled")
+                self.pbar.set(1.0)
+                self.status_lbl.configure(text="✅ PROCESS COMPLETED.")
+                self.append_log("\n=== PROCESS EXECUTION FINISHED ===", "PURPLE")
+
+                if stats and isinstance(stats, dict):
+                    if "total_discovered" in stats:
+                        self.kpi_labels["kpi_discovered"].configure(text=str(stats["total_discovered"]))
+                    if "photos_count" in stats:
+                        self.kpi_labels["kpi_photos"].configure(text=str(stats["photos_count"]))
+                    if "videos_count" in stats:
+                        self.kpi_labels["kpi_videos"].configure(text=str(stats["videos_count"]))
+                    if "duplicates_count" in stats:
+                        self.kpi_labels["kpi_duplicates"].configure(text=str(stats["duplicates_count"]))
+
+                    tot_done = stats.get("photos_count", 0) + stats.get("videos_count", 0)
+                    if tot_done > 0:
+                        errs = stats.get("error_count", 0)
+                        acc = max(0.0, (tot_done - errs) / tot_done * 100)
+                        self.kpi_labels["kpi_confidence"].configure(text=f"{acc:.1f}%")
+
+                    for cat, cnt in stats.get("categories", {}).items():
+                        norm_cat = normalize_category_name(cat)
+                        if norm_cat in self.category_count_labels:
+                            self.category_count_labels[norm_cat].configure(text=str(cnt))
+
+                    self.show_summary_dialog(stats, success_or_dryrun, log_file, checkpoint_file)
+
         self.root.after(100, self.process_queue)
 
+    # ==========================================
+    # TASK EXECUTION DISPATCHERS
+    # ==========================================
     def start_organization(self, dry_run_override: bool = None):
-        src = Path(self.src_var.get())
-        dest = Path(self.dest_var.get())
+        src = Path(self.src_var.get().strip())
+        dest = Path(self.dest_var.get().strip())
 
         if not src.exists():
-            messagebox.showerror("Error", f"Source folder does not exist:\n{src}")
+            messagebox.showerror("Invalid Source", f"Source folder does not exist:\n{src}")
             return
         if not dest.exists():
             try:
                 dest.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                messagebox.showerror("Error", f"Could not create destination folder:\n{e}")
+                messagebox.showerror("Destination Error", f"Could not create destination folder:\n{e}")
                 return
 
+        # Reset counters
+        self.stats = {
+            "discovered": 0,
+            "photos": 0,
+            "videos": 0,
+            "duplicates": 0,
+            "errors": 0,
+            "categories": {cat: 0 for cat in DEFAULT_CATEGORIES},
+        }
+        for key in ("kpi_discovered", "kpi_photos", "kpi_videos", "kpi_duplicates"):
+            self.kpi_labels[key].configure(text="0")
+        self.kpi_labels["kpi_speed"].configure(text="0.0/s")
+        self.kpi_labels["kpi_confidence"].configure(text="--")
+
+        for cat, lbl in self.category_count_labels.items():
+            lbl.configure(text="0")
+            if cat in self.category_chip_frames:
+                self.category_chip_frames[cat].configure(border_color=self.theme["border_color"])
+
         self.is_running = True
-        self.cancel_requested = False
         self.cancel_event.clear()
-        self.dry_run_btn.config_state("disabled")
-        self.execute_btn.config_state("disabled")
-        self.unsort_btn.config_state("disabled")
-        self.stop_btn.config_state("normal")
+        self.start_time = time.time()
+        self.update_session_timer()
+
+        self.dryrun_btn.configure(state="disabled")
+        self.execute_btn.configure(state="disabled")
+        self.unsort_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
         self.log_text.delete("1.0", tk.END)
 
-        is_dry_run = dry_run_override if dry_run_override is not None else (not self.execute_var.get())
+        is_dry_run = dry_run_override if dry_run_override is not None else False
+        action_mode = "move" if "Move" in self.action_segmented.get() else "copy"
 
         config = {
             "src": src,
             "dest": dest,
-            "action": self.action_var.get(),
+            "action": action_mode,
             "dry_run": is_dry_run,
-            "confidence": self.confidence_var.get(),
-            "batch_size": self.batch_var.get(),
-            "threads": self.threads_var.get(),
+            "confidence": float(self.confidence_slider.get()),
+            "batch_size": int(self.batch_slider.get()),
+            "threads": int(self.threads_slider.get()),
             "classify_videos": self.classify_videos_var.get(),
             "dedupe": self.dedupe_var.get(),
             "preserve_folders": self.preserve_folders_var.get(),
             "model_name": self.model_var.get(),
-            "exclude_folders": self.exclude_var.get(),
+            "exclude_folders": ", ".join(self.current_excludes),
         }
 
+        self.append_log(f"⚡ Launching Neural Organizer in {'DRY-RUN (Preview)' if is_dry_run else action_mode.upper()} mode...", "PURPLE")
         threading.Thread(target=self.run_worker, args=(config,), daemon=True).start()
 
     def start_unsort(self):
-        dest = Path(self.dest_var.get())
+        dest = Path(self.dest_var.get().strip())
         log_file = dest / "_organizer_log.csv"
 
         if not log_file.exists():
-            messagebox.showerror("Error", f"No transfer log (_organizer_log.csv) found in destination folder:\n{dest}\n\nCannot unsort without log file.")
+            messagebox.showerror(
+                "Missing Log File",
+                f"No transfer log (_organizer_log.csv) found in destination:\n{dest}\n\nCannot restore files without log history."
+            )
             return
 
-        confirm = messagebox.askyesno("Confirm Unsort & Restore", f"Are you sure you want to restore all organized files in:\n{dest}\n\nback to their original source folders?")
+        confirm = messagebox.askyesno(
+            "Confirm Unsort & Restore",
+            f"Are you sure you want to restore all organized files in:\n{dest}\n\nback to their original source locations?"
+        )
         if not confirm:
             return
 
         self.is_running = True
-        self.cancel_requested = False
-        self.dry_run_btn.config_state("disabled")
-        self.execute_btn.config_state("disabled")
-        self.unsort_btn.config_state("disabled")
-        self.stop_btn.config_state("normal")
+        self.cancel_event.clear()
+        self.start_time = time.time()
+        self.update_session_timer()
+
+        self.dryrun_btn.configure(state="disabled")
+        self.execute_btn.configure(state="disabled")
+        self.unsort_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
         self.log_text.delete("1.0", tk.END)
 
+        self.append_log(f"⏪ Initializing Unsort & Restore pipeline for {dest}...", "PURPLE")
         threading.Thread(target=self.run_unsort_worker, args=(dest,), daemon=True).start()
+
+    def run_worker(self, config: dict):
+        execute_run_worker(config, msg_queue=self.msg_queue, cancel_flag=self.cancel_event)
 
     def run_unsort_worker(self, dest: Path):
         execute_run_unsort_worker(dest_dir=dest, dry_run=False, msg_queue=self.msg_queue, cancel_flag=self.cancel_event)
 
     def stop_organization(self):
         if self.is_running:
-            self.cancel_requested = True
             self.cancel_event.set()
-            self.append_log("[WARN] Stop requested. Finishing in-flight tasks...", "WARN")
-
-    def run_worker(self, config: dict):
-        execute_run_worker(config, msg_queue=self.msg_queue, cancel_flag=self.cancel_event)
+            self.append_log("🛑 Stop requested. Finishing in-flight tasks and saving checkpoint...", "WARN")
 
     def show_summary_dialog(self, stats: dict, dry_run: bool, log_file: Path, checkpoint_file: Path):
         summary_text = (
-            f"Mode: {'DRY RUN (Preview)' if dry_run else 'EXECUTED (' + stats['action'].upper() + ')'}\n\n"
-            f"Total Candidate Files: {stats['total_discovered']}\n"
-            f"Processed Photos:     {stats['photos_count']}\n"
-            f"Processed Videos:     {stats['videos_count']}\n"
-            f"Skipped (Done):       {stats['skipped_count']}\n"
-            f"Duplicates Identified:{stats['duplicates_count']}\n"
-            f"Errors:               {stats['error_count']}\n\n"
-            f"Category Breakdown:\n"
+            f"Mode: {'DRY RUN (Preview)' if dry_run else 'EXECUTED (' + stats.get('action', 'N/A').upper() + ')'}\n\n"
+            f"Total Discovered Files: {stats.get('total_discovered', 0)}\n"
+            f"Processed Photos:       {stats.get('photos_count', 0)}\n"
+            f"Processed Videos:       {stats.get('videos_count', 0)}\n"
+            f"Skipped (Checkpointed): {stats.get('skipped_count', 0)}\n"
+            f"Duplicates Routed:      {stats.get('duplicates_count', 0)}\n"
+            f"Errors / Fallbacks:     {stats.get('error_count', 0)}\n\n"
+            f"Neural Category Breakdown:\n"
         )
-        for cat, cnt in sorted(stats["categories"].items()):
-            summary_text += f"  • {cat}: {cnt} files\n"
+        for cat, cnt in sorted(stats.get("categories", {}).items()):
+            summary_text += f"  • {cat}: {cnt} items\n"
 
         summary_text += f"\nFull Log Saved To:\n{log_file}"
-        messagebox.showinfo("Organization Complete", summary_text)
+        messagebox.showinfo("Organization Finished", summary_text)
 
 
-# ==========================================
-# ENTRY POINT
-# ==========================================
 def main():
-    root = tk.Tk()
-    app = PastelMediaOrganizerGUI(root)
+    root = ctk.CTk()
+    app = MaximalistMediaOrganizerApp(root)
     root.mainloop()
 
 

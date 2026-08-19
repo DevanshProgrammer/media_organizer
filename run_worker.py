@@ -266,6 +266,9 @@ def run_worker(
     ]
     stats["skipped_count"] = len(discovered) - len(pending_items)
 
+    if msg_queue:
+        msg_queue.put(("STATS", stats.copy()))
+
     if not pending_items:
         log_message(
             msg_queue,
@@ -404,6 +407,9 @@ def run_worker(
                         stats=stats,
                     )
 
+                media_type = "VIDEO" if not is_image else "PHOTO"
+                log_message(msg_queue, "OK", f"[{media_type}] {file_path.name} ➔ {cat_name or 'Uncategorized'}")
+
                 if tmp_frame and tmp_frame.exists():
                     try:
                         tmp_frame.unlink()
@@ -418,7 +424,8 @@ def run_worker(
                             (
                                 processed_count,
                                 total_pending,
-                                f"Processing {file_path.name}",
+                                f"Processing {file_path.name} ➔ {cat_name}",
+                                stats.copy(),
                             ),
                         )
                     )

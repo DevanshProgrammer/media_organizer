@@ -14,7 +14,7 @@ Supports **Desktop GUI**, **Web Application**, and **CLI Interface**.
 Install the required dependencies via `pip`:
 
 ```bash
-pip install torch transformers pillow pillow-heif rawpy tqdm
+pip install torch transformers pillow pillow-heif rawpy tqdm customtkinter darkdetect
 ```
 
 #### FFmpeg Setup (Required for Video Classification)

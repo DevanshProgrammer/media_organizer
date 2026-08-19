@@ -48,17 +48,17 @@ from transformers import CLIPProcessor, CLIPModel
 
 # Default Categories
 DEFAULT_CATEGORIES = {
-    "Flora_Plants": "flowers, floral petals, plants, leaves, trees, or botanical close-up photo",
-    "Aviation_Vehicles": "airplane, aircraft, jet, helicopter, car, or vehicle in the sky or on road",
-    "Animal_Wildlife": "animal, pet, dog, cat, mammal, or reptile shown close-up",
-    "Bird": "bird shown close-up as the main subject of the photo",
-    "Portrait": "a portrait or close-up photo of a person or group of people",
-    "Landscape": "landscape scenery of mountains, water, sky, lakes, or forest as main subject",
-    "Street_Urban": "street and urban city view with roads or traffic",
+    "Flora & Plants": "flowers, floral petals, plants, leaves, trees, or botanical close-up photo",
+    "Vehicles & Aviation": "airplane, aircraft, jet, helicopter, car, or vehicle in the sky or on road",
+    "Animals & Wildlife": "animal, pet, dog, cat, mammal, or reptile shown close-up",
+    "Birds & Avian": "bird shown close-up as the main subject of the photo",
+    "Portraits & People": "a portrait or close-up photo of a person or group of people",
+    "Landscapes & Nature": "landscape scenery of mountains, water, sky, lakes, or forest as main subject",
+    "Street & Urban": "street and urban city view with roads or traffic",
     "Architecture": "architecture, building exterior, facade, monument, or interior architectural design",
-    "Food_Dining": "food, meal, dish, or dining setup",
-    "Document": "a document, paper, receipt, invoice, or text screenshot",
-    "Event": "an event, party, wedding, concert, or group celebration",
+    "Food & Dining": "food, meal, dish, or dining setup",
+    "Docs & Receipts": "a document, paper, receipt, invoice, or text screenshot",
+    "Events & Parties": "an event, party, wedding, concert, or group celebration",
 }
 
 RAW_EXTS = {
